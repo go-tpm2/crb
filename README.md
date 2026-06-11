@@ -1,6 +1,11 @@
 # go-tpm2/crb
 
-A pure-Go TPM 2.0 **Command Response Buffer (CRB)** MMIO transport.
+[![CI](https://github.com/go-tpm2/crb/actions/workflows/ci.yml/badge.svg)](https://github.com/go-tpm2/crb/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-tpm2/crb.svg)](https://pkg.go.dev/github.com/go-tpm2/crb)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](#conventions)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
+
+A pure-Go TPM 2.0 **Command Response Buffer (CRB)** MMIO transport. **v0.1.0.**
 
 `crb` implements [`github.com/go-tpm2/common`](https://github.com/go-tpm2/common)'s
 `Transport` interface over its `Regs` MMIO accessor. The platform owns the
@@ -8,6 +13,18 @@ register mapping (a physical MMIO window, an `mmap` of `/dev/mem`, or a test
 stub) and exposes it through `common.Regs`; this package drives the CRB
 register handshake defined by the TCG **PC Client Platform TPM Profile (PTP)
 Specification**, clause *Command Response Buffer Interface*.
+
+Sibling repos: [`common`](https://github.com/go-tpm2/common) (interfaces +
+codec), [`tis`](https://github.com/go-tpm2/tis) (the FIFO transport
+alternative), [`tpm2`](https://github.com/go-tpm2/tpm2) (the command layer
+that rides on this `Transport`), and
+[`validate`](https://github.com/go-tpm2/validate) (live swtpm validation).
+
+## Install
+
+```sh
+go get github.com/go-tpm2/crb
+```
 
 ## Usage
 
@@ -18,14 +35,21 @@ import (
 )
 
 // r is a platform-provided common.Regs over the CRB control area base.
-tpm, err := crb.Open(r)
+dev, err := crb.Open(r)
 if err != nil {
     // not a CRB interface, or the interface never reported valid
 }
 
+// *crb.CRB satisfies common.Transport, so it plugs straight into the
+// go-tpm2/tpm2 command layer:
+//   tpm := tpm2.New(dev)
+//   tpm.Startup(uint16(common.SUClear))
+//   rnd, _ := tpm.GetRandom(20)
+
+// …or drive raw command buffers directly:
 cmd := common.BuildCommand(uint16(common.TagNoSessions),
     uint32(common.CCGetRandom), []byte{0x00, 0x02})
-rsp, err := tpm.Send(cmd) // common.Transport
+rsp, err := dev.Send(cmd) // common.Transport.Send
 ```
 
 ## Send state machine (TCG PTP)
@@ -55,12 +79,22 @@ byte streams through the data buffer.
 
 ## Conventions
 
-Pure Go, `CGO_ENABLED=0`, no assembly, BSD-3-Clause, 100% statement
-coverage (`GOWORK=off go test -cover`).
+Pure Go, `CGO_ENABLED=0`, no assembly, big-endian TPM wire (via `common`),
+BSD-3-Clause, 100% statement coverage (`GOWORK=off go test -cover`),
+`GOWORK=off`.
 
 Register offsets, bit positions, and handshake steps are cited inline to
 the TCG PTP specification. A few values that the spec leaves
 implementation-defined (the data-buffer base offset, the `CTRL_CANCEL`
 write value, the spin bound, the buffer size) are marked `// INFERRED:`
-and verified by a validate harness against a real `swtpm` under QEMU
-`-device tpm-crb`.
+and verified by the [`validate`](https://github.com/go-tpm2/validate)
+harness against a real `swtpm` 0.10.1 under QEMU `-device tpm-crb`.
+
+## Specifications
+
+- TCG PC Client Platform TPM Profile (**PTP**) — *Command Response Buffer Interface*.
+- TCG TPM 2.0 Library, Parts 1–4 (wire format, via `common`).
+
+## License
+
+BSD-3-Clause. See [LICENSE](LICENSE).
