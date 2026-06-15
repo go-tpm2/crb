@@ -1,6 +1,14 @@
-# go-tpm2/crb CI — vet, gofmt, 100%-coverage gate, and a multi-arch
-# build matrix, on every push/PR. This is a pure-Go (CGO=0) module that is
-# NOT part of any workspace, so every Go invocation runs with GOWORK=off.
+# go-tpm2/crb CI — vet, gofmt, and a 100%-coverage gate that RUNS the test
+# suite on every 64-bit arch the go-tpm2 stack supports. This is a pure-Go
+# (CGO=0) module that is NOT part of any workspace, so every Go invocation
+# runs with GOWORK=off.
+#
+# Native amd64 (ubuntu-latest) and arm64 (ubuntu-24.04-arm) run the suite
+# directly. The four remaining arches are cross-compiled into self-contained
+# `go test -c` binaries and executed under QEMU via tonistiigi/binfmt. s390x
+# is BIG-ENDIAN and exercises the go-tpm2 big-endian TPM 2.0 codec end to end
+# (BuildCommand / header parsing), so a byte-order regression in the wire
+# encoding surfaces here, not just in a build.
 
 name: ci
 
@@ -18,9 +26,16 @@ env:
   CGO_ENABLED: 0
 
 jobs:
+  # Native arches: vet + gofmt + run the suite + 100% coverage gate.
   test:
-    name: vet + gofmt + 100% coverage
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: amd64 }
+          - { os: ubuntu-24.04-arm, arch: arm64 }
     steps:
       - uses: actions/checkout@v4
 
@@ -54,14 +69,26 @@ jobs:
           awk -v p="$pct" 'BEGIN { exit !(p+0 >= 100.0) }' || {
             echo "::error::coverage ${pct}% < 100.0%"; exit 1; }
 
-  build:
-    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+  # Emulated arches under QEMU. The CRB driver is pure Go with no arch-specific
+  # assembly, so these jobs exercise the same statements as the native runs —
+  # the point is to prove the BIG-ENDIAN s390x target (and the other ports)
+  # actually RUN the suite and pass the 100% gate, not merely compile. qemu cpu
+  # models are the green set from the go-simd / go-compressions matrix (power9
+  # for ppc64le, la464 for loong64, the default "qemu" for s390x — NOT z14,
+  # which is fatal under TCG; rv64 with the V extension for riscv64). loong64
+  # uses the loong64/debian image because Debian trixie has no official loong64
+  # port image.
+  emulated:
+    name: emulated (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux]
-        goarch: [amd64, arm64, riscv64, loong64]
+        include:
+          - { arch: riscv64, image: "debian:trixie", qemu: "rv64,v=true,vlen=128" }
+          - { arch: loong64, image: "ghcr.io/loong64/debian:trixie", qemu: "la464" }
+          - { arch: ppc64le, image: "debian:trixie", qemu: "power9" }
+          - { arch: s390x,   image: "debian:trixie", qemu: "qemu" }
     steps:
       - uses: actions/checkout@v4
 
@@ -70,10 +97,19 @@ jobs:
           go-version: stable
           check-latest: true
 
-      # Prove the package compiles cleanly on every 64-bit target the
-      # go-tpm2 stack supports — no arch-specific breakage slips in.
-      - name: go build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go build ./...
+      - run: docker run --privileged --rm tonistiigi/binfmt --install ${{ matrix.arch }}
+
+      - name: build cover test binary
+        run: GOOS=linux GOARCH=${{ matrix.arch }} go test -cover -coverpkg=./... -c -o /tmp/cov.test .
+
+      - name: run under qemu and gate (100%)
+        run: |
+          docker run --rm --platform linux/${{ matrix.arch }} \
+            -e QEMU_CPU=${{ matrix.qemu }} \
+            -v /tmp:/t ${{ matrix.image }} \
+            /t/cov.test -test.v -test.coverprofile=/t/cov.out
+          go tool cover -func=/tmp/cov.out | tee /tmp/cover.txt
+          pct=$(go tool cover -func=/tmp/cov.out | tail -n 1 | awk '{print $3}' | tr -d '%')
+          echo "total coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit !(p+0 >= 100.0) }' || {
+            echo "::error::coverage ${pct}% < 100.0%"; exit 1; }
